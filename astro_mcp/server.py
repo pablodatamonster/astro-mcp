@@ -11,6 +11,12 @@ or via the installed script:
     astro-mcp
 """
 
+import os
+import uvicorn
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Mount, Route
 from mcp.server.fastmcp import FastMCP
 from kerykeion import AstrologicalSubject
 
@@ -52,7 +58,7 @@ def get_natal_chart(
     name         : Person's name
     birth_date   : Date of birth in YYYY-MM-DD format (e.g. 1973-07-25)
     birth_time   : Time of birth in HH:MM format, 24h (e.g. 17:25)
-    city         : City of birth (e.g. 'Buenos Aires', 'London', 'Córdoba')
+    city         : City of birth (e.g. 'Buenos Aires', 'London', 'Cordoba')
     country_code : ISO 2-letter country code to help geocoding (e.g. 'AR', 'ES', 'MX')
     lat          : Latitude override (decimal degrees). Provide if city geocoding fails.
     lng          : Longitude override (decimal degrees).
@@ -64,11 +70,9 @@ def get_natal_chart(
     Formatted natal chart as text.
     """
     try:
-        # Parse date and time
         year, month, day = (int(p) for p in birth_date.split("-"))
         hour, minute = (int(p) for p in birth_time.split(":"))
 
-        # Resolve coordinates
         if lat is None or lng is None or tz_str is None:
             resolved_lat, resolved_lng, resolved_tz = geocode_city(city, country_code)
             lat    = lat    or resolved_lat
@@ -123,11 +127,7 @@ def get_solar_return(
     language: str = "en",
 ) -> str:
     """
-    Generate a Solar Return (Revolución Solar) chart for a given year.
-
-    The Solar Return is cast for the exact moment the Sun returns to its
-    natal position in the given year. The chart location can differ from
-    the birth location (useful for relocation analysis).
+    Generate a Solar Return (Revolucion Solar) chart for a given year.
 
     Parameters
     ----------
@@ -140,7 +140,7 @@ def get_solar_return(
     birth_lat          : Latitude of birth city (override)
     birth_lng          : Longitude of birth city (override)
     birth_tz_str       : Timezone of birth city (override)
-    return_city        : City for SR chart (defaults to birth city if not provided)
+    return_city        : City where the SR is cast (defaults to birth city)
     return_country_code: ISO country code for return city
     return_lat         : Latitude of return city (override)
     return_lng         : Longitude of return city (override)
@@ -152,23 +152,20 @@ def get_solar_return(
     Formatted Solar Return chart as text.
     """
     try:
-        # Parse birth date and time
         b_year, b_month, b_day = (int(p) for p in birth_date.split("-"))
         b_hour, b_minute = (int(p) for p in birth_time.split(":"))
 
-        # Resolve birth coordinates
         if birth_lat is None or birth_lng is None or birth_tz_str is None:
             r_lat, r_lng, r_tz = geocode_city(birth_city, birth_country_code)
-            birth_lat     = birth_lat     or r_lat
-            birth_lng     = birth_lng     or r_lng
-            birth_tz_str  = birth_tz_str  or r_tz
+            birth_lat    = birth_lat    or r_lat
+            birth_lng    = birth_lng    or r_lng
+            birth_tz_str = birth_tz_str or r_tz
 
-        # Resolve return city coordinates (default to birth city)
         if return_city is None:
-            return_city         = birth_city
-            return_lat          = return_lat  or birth_lat
-            return_lng          = return_lng  or birth_lng
-            return_tz_str       = return_tz_str or birth_tz_str
+            return_city   = birth_city
+            return_lat    = return_lat  or birth_lat
+            return_lng    = return_lng  or birth_lng
+            return_tz_str = return_tz_str or birth_tz_str
         else:
             if return_lat is None or return_lng is None or return_tz_str is None:
                 rr_lat, rr_lng, rr_tz = geocode_city(return_city, return_country_code)
@@ -176,7 +173,6 @@ def get_solar_return(
                 return_lng    = return_lng    or rr_lng
                 return_tz_str = return_tz_str or rr_tz
 
-        # Build natal subject (for natal Sun reference)
         natal_subject = AstrologicalSubject(
             name,
             b_year, b_month, b_day,
@@ -190,7 +186,6 @@ def get_solar_return(
             online=False,
         )
 
-        # Compute the Solar Return
         sr_subject, sr_utc = compute_solar_return(
             name=name,
             birth_year=b_year, birth_month=b_month, birth_day=b_day,
@@ -220,11 +215,46 @@ def get_solar_return(
 # Entry point
 # ---------------------------------------------------------------------------
 
+async def oauth_metadata(request: Request):
+    """
+    Return empty OAuth metadata so Claude.ai knows no auth is required.
+    Per the MCP spec, returning an empty object signals unauthenticated access.
+    """
+    base_url = str(request.base_url).rstrip("/")
+    return JSONResponse({
+        "issuer": base_url,
+        "token_endpoint": f"{base_url}/token",
+        "response_types_supported": ["token"],
+        "grant_types_supported": ["client_credentials"],
+    })
+
+
+async def token_endpoint(request: Request):
+    """Issue a dummy token so clients that require one can proceed."""
+    return JSONResponse({
+        "access_token": "no-auth-required",
+        "token_type": "bearer",
+        "expires_in": 86400,
+    })
+
+
 def main():
-    import os
-    import uvicorn
     port = int(os.environ.get("PORT", 8080))
-    app = mcp.streamable_http_app()
+
+    mcp_app = mcp.streamable_http_app()
+
+    app = Starlette(
+        routes=[
+            Route(
+                "/.well-known/oauth-authorization-server",
+                oauth_metadata,
+                methods=["GET"],
+            ),
+            Route("/token", token_endpoint, methods=["POST"]),
+            Mount("/", app=mcp_app),
+        ]
+    )
+
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 
