@@ -221,7 +221,9 @@ def get_solar_return(
 # ---------------------------------------------------------------------------
 
 def main():
-    mcp.run(transport="stdio")
+    import os
+    port = int(os.environ.get("PORT", 8000))
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
