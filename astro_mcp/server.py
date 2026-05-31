@@ -20,12 +20,69 @@ from .chart import render_natal_chart, render_solar_return
 from .solar_return import compute_solar_return
 
 
+import time
+from uuid import uuid4
+from starlette.responses import JSONResponse
+from mcp.server.auth.routes import cors_middleware, Route
+from mcp.shared.auth import OAuthClientInformationFull
+
 BASE_URL = os.environ.get(
     "BASE_URL",
     "https://astro-mcp-187388165727.europe-west1.run.app",
 )
 
-auth = InMemoryOAuthProvider(
+class PermissiveOAuthProvider(InMemoryOAuthProvider):
+    def get_routes(self, mcp_path: str | None = None) -> list[Route]:
+        standard_routes = super().get_routes(mcp_path)
+        new_routes = []
+        for route in standard_routes:
+            if isinstance(route, Route) and route.path == "/register":
+                async def custom_register(request):
+                    try:
+                        body = await request.json()
+                    except Exception:
+                        return JSONResponse({"error": "invalid_request", "error_description": "Invalid JSON body"}, status_code=400)
+                    
+                    client_id = str(uuid4())
+                    client_id_issued_at = int(time.time())
+                    
+                    client_info = OAuthClientInformationFull(
+                        client_id=client_id,
+                        client_id_issued_at=client_id_issued_at,
+                        client_secret=None,
+                        client_secret_expires_at=None,
+                        redirect_uris=body.get("redirect_uris", []),
+                        token_endpoint_auth_method=body.get("token_endpoint_auth_method", "none"),
+                        grant_types=body.get("grant_types", ["authorization_code"]),
+                        response_types=body.get("response_types", ["code"]),
+                        client_name=body.get("client_name", "Claude"),
+                        scope=body.get("scope", None)
+                    )
+                    
+                    self.clients[client_id] = client_info
+                    
+                    try:
+                        content = client_info.model_dump()
+                    except AttributeError:
+                        content = client_info.dict()
+                        
+                    if "redirect_uris" in content:
+                        content["redirect_uris"] = [str(u) for u in content["redirect_uris"]]
+                    
+                    return JSONResponse(content, status_code=201)
+                
+                new_routes.append(
+                    Route(
+                        path="/register",
+                        endpoint=cors_middleware(custom_register, ["POST", "OPTIONS"]),
+                        methods=["POST", "OPTIONS"]
+                    )
+                )
+            else:
+                new_routes.append(route)
+        return new_routes
+
+auth = PermissiveOAuthProvider(
     base_url=BASE_URL,
     client_registration_options=ClientRegistrationOptions(enabled=True),
 )
