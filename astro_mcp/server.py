@@ -1,28 +1,23 @@
 """
 Astrology MCP Server
 ====================
-Exposes two tools to Claude:
-  - get_natal_chart   : Natal chart for any person
-  - get_solar_return  : Solar Return (Revolucion Solar) for any year/location
+Tools: get_natal_chart, get_solar_return
+OAuth: custom minimal implementation, accepts all clients
 """
 
 import os
 import secrets
 import time
 import uvicorn
+
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, RedirectResponse
+from starlette.routing import Mount, Route
+from starlette.middleware.cors import CORSMiddleware
 from urllib.parse import urlencode
 
-from pydantic import AnyHttpUrl
 from mcp.server.fastmcp import FastMCP
-from mcp.server.auth.provider import (
-    OAuthAuthorizationServerProvider,
-    AuthorizationParams,
-    AuthorizationCode,
-    AccessToken,
-    RefreshToken,
-)
-from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
-from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from kerykeion import AstrologicalSubject
 
 from .geocode import geocode_city
@@ -31,133 +26,15 @@ from .solar_return import compute_solar_return
 
 
 # ---------------------------------------------------------------------------
-# Minimal OAuth Provider
-# Implements the full OAuth 2.0 authorization code + PKCE flow in memory.
-# This allows Claude.ai to connect without requiring real user authentication.
-# All clients are accepted, all tokens are issued freely.
+# MCP server (no auth - our custom OAuth layer handles that separately)
 # ---------------------------------------------------------------------------
-
-class MinimalOAuthProvider(OAuthAuthorizationServerProvider):
-
-    def __init__(self):
-        self.clients: dict[str, OAuthClientInformationFull] = {}
-        self.auth_codes: dict[str, AuthorizationCode] = {}
-        self.access_tokens: dict[str, AccessToken] = {}
-        self.refresh_tokens: dict[str, RefreshToken] = {}
-
-    async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        return self.clients.get(client_id)
-
-    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        self.clients[client_info.client_id] = client_info
-
-    async def authorize(
-        self, client: OAuthClientInformationFull, params: AuthorizationParams
-    ) -> str:
-        code = secrets.token_urlsafe(32)
-        self.auth_codes[code] = AuthorizationCode(
-            code=code,
-            scopes=params.scopes or [],
-            expires_at=time.time() + 300,
-            client_id=client.client_id,
-            code_challenge=params.code_challenge,
-            redirect_uri=params.redirect_uri,
-            redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
-        )
-        redirect = str(params.redirect_uri)
-        sep = "&" if "?" in redirect else "?"
-        qp: dict[str, str] = {"code": code}
-        if params.state:
-            qp["state"] = params.state
-        return redirect + sep + urlencode(qp)
-
-    async def load_authorization_code(
-        self, client: OAuthClientInformationFull, code: str
-    ) -> AuthorizationCode | None:
-        return self.auth_codes.get(code)
-
-    async def exchange_authorization_code(
-        self, client: OAuthClientInformationFull, auth_code: AuthorizationCode
-    ) -> OAuthToken:
-        at = secrets.token_urlsafe(32)
-        rt = secrets.token_urlsafe(32)
-        self.access_tokens[at] = AccessToken(
-            token=at,
-            client_id=client.client_id,
-            scopes=auth_code.scopes,
-            expires_at=int(time.time()) + 3600,
-        )
-        self.refresh_tokens[rt] = RefreshToken(
-            token=rt,
-            client_id=client.client_id,
-            scopes=auth_code.scopes,
-        )
-        self.auth_codes.pop(auth_code.code, None)
-        return OAuthToken(
-            access_token=at,
-            token_type="bearer",
-            expires_in=3600,
-            refresh_token=rt,
-            scope=" ".join(auth_code.scopes) if auth_code.scopes else None,
-        )
-
-    async def load_refresh_token(
-        self, client: OAuthClientInformationFull, token: str
-    ) -> RefreshToken | None:
-        return self.refresh_tokens.get(token)
-
-    async def exchange_refresh_token(
-        self,
-        client: OAuthClientInformationFull,
-        refresh_token: RefreshToken,
-        scopes: list[str],
-    ) -> OAuthToken:
-        at = secrets.token_urlsafe(32)
-        self.access_tokens[at] = AccessToken(
-            token=at,
-            client_id=client.client_id,
-            scopes=scopes,
-            expires_at=int(time.time()) + 3600,
-        )
-        return OAuthToken(
-            access_token=at,
-            token_type="bearer",
-            expires_in=3600,
-            refresh_token=refresh_token.token,
-            scope=" ".join(scopes) if scopes else None,
-        )
-
-    async def load_access_token(self, token: str) -> AccessToken | None:
-        t = self.access_tokens.get(token)
-        if t and t.expires_at and t.expires_at > time.time():
-            return t
-        return None
-
-
-# ---------------------------------------------------------------------------
-# MCP Server setup
-# SERVER_URL must match the public URL of this service (set as env var in GCP)
-# ---------------------------------------------------------------------------
-
-SERVER_URL = os.environ.get(
-    "SERVER_URL",
-    "https://astro-mcp-187388165727.europe-west1.run.app",
-)
-
-oauth_provider = MinimalOAuthProvider()
 
 mcp = FastMCP(
     "astro-mcp",
-    auth=AuthSettings(
-        issuer_url=AnyHttpUrl(SERVER_URL),
-        resource_server_url=AnyHttpUrl(f"{SERVER_URL}/mcp"),
-        client_registration_options=ClientRegistrationOptions(enabled=True),
-    ),
-    auth_server_provider=oauth_provider,
     instructions=(
         "Astrology server providing natal charts and solar returns. "
         "Supports English and Spanish output. "
-        "Use get_natal_chart for birth charts and get_solar_return for yearly solar returns."
+        "Use get_natal_chart for birth charts, get_solar_return for yearly solar returns."
     ),
 )
 
@@ -184,24 +61,24 @@ def get_natal_chart(
     Parameters
     ----------
     name         : Person's name
-    birth_date   : Date of birth in YYYY-MM-DD format (e.g. 1973-07-25)
-    birth_time   : Time of birth in HH:MM format, 24h (e.g. 17:25)
-    city         : City of birth (e.g. Buenos Aires, London, Cordoba)
-    country_code : ISO 2-letter country code (e.g. AR, ES, MX)
-    lat          : Latitude override (decimal degrees)
-    lng          : Longitude override (decimal degrees)
+    birth_date   : YYYY-MM-DD  (e.g. 1973-07-25)
+    birth_time   : HH:MM 24h   (e.g. 17:25)
+    city         : City of birth
+    country_code : ISO 2-letter code (e.g. AR, ES, MX, GB)
+    lat          : Latitude override
+    lng          : Longitude override
     tz_str       : Timezone override (e.g. America/Argentina/Buenos_Aires)
-    language     : en for English, es for Spanish (default: en)
+    language     : en or es (default: en)
     """
     try:
         year, month, day = (int(p) for p in birth_date.split("-"))
-        hour, minute = (int(p) for p in birth_time.split(":"))
+        hour, minute     = (int(p) for p in birth_time.split(":"))
 
         if lat is None or lng is None or tz_str is None:
-            resolved_lat, resolved_lng, resolved_tz = geocode_city(city, country_code)
-            lat    = lat    or resolved_lat
-            lng    = lng    or resolved_lng
-            tz_str = tz_str or resolved_tz
+            r_lat, r_lng, r_tz = geocode_city(city, country_code)
+            lat    = lat    or r_lat
+            lng    = lng    or r_lng
+            tz_str = tz_str or r_tz
 
         subject = AstrologicalSubject(
             name, year, month, day, hour, minute,
@@ -209,7 +86,6 @@ def get_natal_chart(
             lat=lat, lng=lng, tz_str=tz_str,
             zodiac_type="Tropic", online=False,
         )
-
         return render_natal_chart(
             subject=subject,
             birth_year=year, birth_month=month, birth_day=day,
@@ -217,7 +93,6 @@ def get_natal_chart(
             city=city, lat=lat, lng=lng,
             lang=language,
         )
-
     except Exception as e:
         return f"Error generating natal chart: {e}"
 
@@ -250,20 +125,20 @@ def get_solar_return(
     Parameters
     ----------
     name               : Person's name
-    birth_date         : Date of birth YYYY-MM-DD (e.g. 1973-07-25)
-    birth_time         : Time of birth HH:MM 24h (e.g. 17:25)
+    birth_date         : YYYY-MM-DD
+    birth_time         : HH:MM 24h
     birth_city         : City of birth
-    return_year        : Year for the Solar Return (e.g. 2025)
+    return_year        : Year for the Solar Return (e.g. 2026)
     birth_country_code : ISO 2-letter code for birth city
     birth_lat/lng/tz_str : Coordinate overrides for birth city
     return_city        : City where SR is cast (defaults to birth city)
     return_country_code: ISO 2-letter code for return city
     return_lat/lng/tz_str : Coordinate overrides for return city
-    language           : en for English, es for Spanish
+    language           : en or es
     """
     try:
         b_year, b_month, b_day = (int(p) for p in birth_date.split("-"))
-        b_hour, b_minute = (int(p) for p in birth_time.split(":"))
+        b_hour, b_minute       = (int(p) for p in birth_time.split(":"))
 
         if birth_lat is None or birth_lng is None or birth_tz_str is None:
             r_lat, r_lng, r_tz = geocode_city(birth_city, birth_country_code)
@@ -283,13 +158,12 @@ def get_solar_return(
                 return_lng    = return_lng    or rr_lng
                 return_tz_str = return_tz_str or rr_tz
 
-        natal_subject = AstrologicalSubject(
+        natal = AstrologicalSubject(
             name, b_year, b_month, b_day, b_hour, b_minute,
             birth_city, birth_country_code or "XX",
             lat=birth_lat, lng=birth_lng, tz_str=birth_tz_str,
             zodiac_type="Tropic", online=False,
         )
-
         sr_subject, sr_utc = compute_solar_return(
             name=name,
             birth_year=b_year, birth_month=b_month, birth_day=b_day,
@@ -298,10 +172,9 @@ def get_solar_return(
             return_year=return_year,
             return_lat=return_lat, return_lng=return_lng, return_tz=return_tz_str,
         )
-
         return render_solar_return(
             sr_subject=sr_subject,
-            natal_subject=natal_subject,
+            natal_subject=natal,
             sr_utc_datetime=sr_utc,
             return_year=return_year,
             return_city=return_city,
@@ -310,18 +183,112 @@ def get_solar_return(
             name=name,
             lang=language,
         )
-
     except Exception as e:
         return f"Error generating Solar Return: {e}"
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Custom minimal OAuth 2.0 layer
+# Accepts all clients, issues tokens freely. No real authentication needed.
+# ---------------------------------------------------------------------------
+
+_clients: dict = {}
+_codes:   dict = {}
+_tokens:  dict = {}
+
+
+async def oauth_discovery(request: Request) -> JSONResponse:
+    base = str(request.base_url).rstrip("/")
+    return JSONResponse({
+        "issuer":                                base,
+        "authorization_endpoint":                f"{base}/authorize",
+        "token_endpoint":                        f"{base}/token",
+        "registration_endpoint":                 f"{base}/register",
+        "response_types_supported":              ["code"],
+        "grant_types_supported":                 ["authorization_code", "refresh_token"],
+        "token_endpoint_auth_methods_supported": ["none", "client_secret_post", "client_secret_basic"],
+        "code_challenge_methods_supported":      ["S256"],
+    })
+
+
+async def register(request: Request) -> JSONResponse:
+    """Accept any client registration without validation."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    client_id     = secrets.token_urlsafe(16)
+    client_secret = secrets.token_urlsafe(32)
+    _clients[client_id] = {**body, "client_id": client_id}
+    return JSONResponse({
+        "client_id":                  client_id,
+        "client_secret":              client_secret,
+        "client_id_issued_at":        int(time.time()),
+        "grant_types":                body.get("grant_types", ["authorization_code"]),
+        "response_types":             body.get("response_types", ["code"]),
+        "redirect_uris":              body.get("redirect_uris", []),
+        "token_endpoint_auth_method": body.get("token_endpoint_auth_method", "none"),
+    }, status_code=201)
+
+
+async def authorize(request: Request) -> RedirectResponse:
+    """Immediately issue an auth code and redirect back. No login page needed."""
+    params      = dict(request.query_params)
+    code        = secrets.token_urlsafe(32)
+    redirect_uri = params.get("redirect_uri", "/")
+    _codes[code] = {
+        "client_id":    params.get("client_id"),
+        "redirect_uri": redirect_uri,
+        "expires_at":   time.time() + 300,
+    }
+    sep = "&" if "?" in redirect_uri else "?"
+    qp  = {"code": code}
+    if "state" in params:
+        qp["state"] = params["state"]
+    return RedirectResponse(redirect_uri + sep + urlencode(qp), status_code=302)
+
+
+async def token_endpoint(request: Request) -> JSONResponse:
+    """Issue an access token for any valid-looking request."""
+    try:
+        form = dict(await request.form())
+    except Exception:
+        form = {}
+    access_token  = secrets.token_urlsafe(32)
+    refresh_token = secrets.token_urlsafe(32)
+    _tokens[access_token] = {"expires_at": time.time() + 3600}
+    return JSONResponse({
+        "access_token":  access_token,
+        "token_type":    "bearer",
+        "expires_in":    3600,
+        "refresh_token": refresh_token,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Entry point: assemble the full app
 # ---------------------------------------------------------------------------
 
 def main():
-    port = int(os.environ.get("PORT", 8080))
-    app = mcp.streamable_http_app()
+    port    = int(os.environ.get("PORT", 8080))
+    mcp_app = mcp.streamable_http_app()
+
+    app = Starlette(routes=[
+        Route("/.well-known/oauth-authorization-server", oauth_discovery, methods=["GET", "OPTIONS"]),
+        Route("/register",  register,        methods=["POST", "OPTIONS"]),
+        Route("/authorize", authorize,        methods=["GET",  "OPTIONS"]),
+        Route("/token",     token_endpoint,   methods=["POST", "OPTIONS"]),
+        Mount("/", app=mcp_app),
+    ])
+
+    # Wide-open CORS so Claude.ai (browser-based) can reach all endpoints
+    app = CORSMiddleware(
+        app,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 
