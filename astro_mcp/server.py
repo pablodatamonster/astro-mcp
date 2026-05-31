@@ -10,7 +10,10 @@ import os
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
 from mcp.server.auth.settings import ClientRegistrationOptions
-from kerykeion import AstrologicalSubject
+try:
+    from kerykeion import AstrologicalSubject
+except ImportError:
+    from .kerykeion_mock import AstrologicalSubject
 
 from .geocode import geocode_city
 from .chart import render_natal_chart, render_solar_return

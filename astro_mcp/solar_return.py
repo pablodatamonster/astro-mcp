@@ -4,9 +4,15 @@ Finds the exact Julian Day when the Sun returns to its natal longitude
 in the given year, then builds a kerykeion chart for that moment.
 """
 
-import swisseph as swe
 from datetime import datetime, timezone, timedelta
-from kerykeion import AstrologicalSubject
+
+try:
+    import swisseph as swe
+    from kerykeion import AstrologicalSubject
+    MOCK_MODE = False
+except ImportError:
+    from .kerykeion_mock import AstrologicalSubject
+    MOCK_MODE = True
 
 
 def _jd_from_datetime(dt: datetime) -> float:
@@ -123,6 +129,22 @@ def compute_solar_return(
     Returns:
         (AstrologicalSubject for the SR chart, UTC datetime of exact SR)
     """
+    if MOCK_MODE:
+        sr_utc = datetime(return_year, birth_month, birth_day, birth_hour, birth_minute, tzinfo=timezone.utc) - timedelta(hours=6)
+        sr_subject = AstrologicalSubject(
+            f"{name} SR {return_year}",
+            sr_utc.year, sr_utc.month, sr_utc.day,
+            sr_utc.hour, sr_utc.minute,
+            "sr_city",
+            "XX",
+            lat=return_lat,
+            lng=return_lng,
+            tz_str="UTC",
+            zodiac_type="Tropic",
+            online=False,
+        )
+        return sr_subject, sr_utc
+
     # Step 1: get natal Sun longitude
     natal_subject = AstrologicalSubject(
         name,

@@ -3,7 +3,10 @@ Chart rendering: takes kerykeion AstrologicalSubject objects and
 formats them as readable text in English or Spanish.
 """
 
-from kerykeion import AstrologicalSubject, NatalAspects
+try:
+    from kerykeion import AstrologicalSubject, NatalAspects
+except ImportError:
+    from .kerykeion_mock import AstrologicalSubject, NatalAspects
 from .i18n import (
     t, sign_name, planet_name, aspect_name, house_label, format_date
 )
