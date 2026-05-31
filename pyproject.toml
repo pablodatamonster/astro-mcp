@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "astro-mcp"
+version = "0.1.0"
+description = "Astrology MCP Server - Natal Charts and Solar Returns (EN/ES)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.0.0",
+    "kerykeion>=4.0.0",
+    "geopy>=2.4.0",
+    "timezonefinder>=6.0.0",
+    "pyswisseph>=2.10.0",
+]
+
+[project.scripts]
+astro-mcp = "astro_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["astro_mcp"]
