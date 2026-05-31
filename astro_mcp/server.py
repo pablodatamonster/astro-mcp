@@ -7,20 +7,153 @@ Exposes two tools to Claude:
 """
 
 import os
+import secrets
+import time
 import uvicorn
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse
-from starlette.routing import Mount, Route
+from urllib.parse import urlencode
+
+from pydantic import AnyHttpUrl
 from mcp.server.fastmcp import FastMCP
+from mcp.server.auth.provider import (
+    OAuthAuthorizationServerProvider,
+    AuthorizationParams,
+    AuthorizationCode,
+    AccessToken,
+    RefreshToken,
+)
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
+from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from kerykeion import AstrologicalSubject
 
 from .geocode import geocode_city
 from .chart import render_natal_chart, render_solar_return
 from .solar_return import compute_solar_return
 
+
+# ---------------------------------------------------------------------------
+# Minimal OAuth Provider
+# Implements the full OAuth 2.0 authorization code + PKCE flow in memory.
+# This allows Claude.ai to connect without requiring real user authentication.
+# All clients are accepted, all tokens are issued freely.
+# ---------------------------------------------------------------------------
+
+class MinimalOAuthProvider(OAuthAuthorizationServerProvider):
+
+    def __init__(self):
+        self.clients: dict[str, OAuthClientInformationFull] = {}
+        self.auth_codes: dict[str, AuthorizationCode] = {}
+        self.access_tokens: dict[str, AccessToken] = {}
+        self.refresh_tokens: dict[str, RefreshToken] = {}
+
+    async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
+        return self.clients.get(client_id)
+
+    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        self.clients[client_info.client_id] = client_info
+
+    async def authorize(
+        self, client: OAuthClientInformationFull, params: AuthorizationParams
+    ) -> str:
+        code = secrets.token_urlsafe(32)
+        self.auth_codes[code] = AuthorizationCode(
+            code=code,
+            scopes=params.scopes or [],
+            expires_at=time.time() + 300,
+            client_id=client.client_id,
+            code_challenge=params.code_challenge,
+            redirect_uri=params.redirect_uri,
+            redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
+        )
+        redirect = str(params.redirect_uri)
+        sep = "&" if "?" in redirect else "?"
+        qp: dict[str, str] = {"code": code}
+        if params.state:
+            qp["state"] = params.state
+        return redirect + sep + urlencode(qp)
+
+    async def load_authorization_code(
+        self, client: OAuthClientInformationFull, code: str
+    ) -> AuthorizationCode | None:
+        return self.auth_codes.get(code)
+
+    async def exchange_authorization_code(
+        self, client: OAuthClientInformationFull, auth_code: AuthorizationCode
+    ) -> OAuthToken:
+        at = secrets.token_urlsafe(32)
+        rt = secrets.token_urlsafe(32)
+        self.access_tokens[at] = AccessToken(
+            token=at,
+            client_id=client.client_id,
+            scopes=auth_code.scopes,
+            expires_at=int(time.time()) + 3600,
+        )
+        self.refresh_tokens[rt] = RefreshToken(
+            token=rt,
+            client_id=client.client_id,
+            scopes=auth_code.scopes,
+        )
+        self.auth_codes.pop(auth_code.code, None)
+        return OAuthToken(
+            access_token=at,
+            token_type="bearer",
+            expires_in=3600,
+            refresh_token=rt,
+            scope=" ".join(auth_code.scopes) if auth_code.scopes else None,
+        )
+
+    async def load_refresh_token(
+        self, client: OAuthClientInformationFull, token: str
+    ) -> RefreshToken | None:
+        return self.refresh_tokens.get(token)
+
+    async def exchange_refresh_token(
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: RefreshToken,
+        scopes: list[str],
+    ) -> OAuthToken:
+        at = secrets.token_urlsafe(32)
+        self.access_tokens[at] = AccessToken(
+            token=at,
+            client_id=client.client_id,
+            scopes=scopes,
+            expires_at=int(time.time()) + 3600,
+        )
+        return OAuthToken(
+            access_token=at,
+            token_type="bearer",
+            expires_in=3600,
+            refresh_token=refresh_token.token,
+            scope=" ".join(scopes) if scopes else None,
+        )
+
+    async def load_access_token(self, token: str) -> AccessToken | None:
+        t = self.access_tokens.get(token)
+        if t and t.expires_at and t.expires_at > time.time():
+            return t
+        return None
+
+
+# ---------------------------------------------------------------------------
+# MCP Server setup
+# SERVER_URL must match the public URL of this service (set as env var in GCP)
+# ---------------------------------------------------------------------------
+
+SERVER_URL = os.environ.get(
+    "SERVER_URL",
+    "https://astro-mcp-187388165727.europe-west1.run.app",
+)
+
+oauth_provider = MinimalOAuthProvider()
+
 mcp = FastMCP(
     "astro-mcp",
+    auth=AuthSettings(
+        issuer_url=AnyHttpUrl(SERVER_URL),
+        resource_server_url=AnyHttpUrl(f"{SERVER_URL}/mcp"),
+        client_registration_options=ClientRegistrationOptions(enabled=True),
+    ),
+    auth_server_provider=oauth_provider,
     instructions=(
         "Astrology server providing natal charts and solar returns. "
         "Supports English and Spanish output. "
@@ -188,40 +321,7 @@ def get_solar_return(
 
 def main():
     port = int(os.environ.get("PORT", 8080))
-
-    mcp_app = mcp.streamable_http_app()
-
-    # RFC 9728: Protected Resource Metadata with empty authorization_servers
-    # tells Claude.ai that this server requires NO authentication.
-    async def protected_resource_meta(request: Request) -> JSONResponse:
-        base = str(request.base_url).rstrip("/")
-        return JSONResponse({
-            "resource": f"{base}/mcp",
-            "authorization_servers": [],
-            "bearer_methods_supported": [],
-            "scopes_supported": [],
-        })
-
-    # Fallback OAuth discovery endpoint - returns empty to signal no auth
-    async def oauth_server_meta(request: Request) -> JSONResponse:
-        return JSONResponse({})
-
-    app = Starlette(
-        routes=[
-            Route(
-                "/.well-known/oauth-protected-resource/mcp",
-                protected_resource_meta,
-                methods=["GET"],
-            ),
-            Route(
-                "/.well-known/oauth-authorization-server",
-                oauth_server_meta,
-                methods=["GET"],
-            ),
-            Mount("/", app=mcp_app),
-        ]
-    )
-
+    app = mcp.streamable_http_app()
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 
