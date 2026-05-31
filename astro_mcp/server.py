@@ -56,7 +56,7 @@ class PermissiveOAuthProvider(InMemoryOAuthProvider):
                         grant_types=body.get("grant_types", ["authorization_code"]),
                         response_types=body.get("response_types", ["code"]),
                         client_name=body.get("client_name", "Claude"),
-                        scope=body.get("scope", None)
+                        scope=body.get("scope", "openid")
                     )
                     
                     self.clients[client_id] = client_info
