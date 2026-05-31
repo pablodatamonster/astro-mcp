@@ -50,10 +50,10 @@ ASPECTS = {
 
 HOUSES = {
     "en": {
-        "First_House": "1st", "Second_House": "2nd", "Third_House": "3rd",
-        "Fourth_House": "4th", "Fifth_House": "5th", "Sixth_House": "6th",
-        "Seventh_House": "7th", "Eighth_House": "8th", "Ninth_House": "9th",
-        "Tenth_House": "10th", "Eleventh_House": "11th", "Twelfth_House": "12th",
+        "First_House": "H1", "Second_House": "H2", "Third_House": "H3",
+        "Fourth_House": "H4", "Fifth_House": "H5", "Sixth_House": "H6",
+        "Seventh_House": "H7", "Eighth_House": "H8", "Ninth_House": "H9",
+        "Tenth_House": "H10", "Eleventh_House": "H11", "Twelfth_House": "H12",
     },
     "es": {
         "First_House": "Casa 1", "Second_House": "Casa 2", "Third_House": "Casa 3",

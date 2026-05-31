@@ -4,9 +4,18 @@ Uses Nominatim (OpenStreetMap, no API key needed) + timezonefinder.
 Falls back gracefully if offline.
 """
 
+import unicodedata
+
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderUnavailable
 from timezonefinder import TimezoneFinder
+
+
+def _normalize(s: str) -> str:
+    """Lowercase and strip diacritics so 'Morón' matches the 'moron' table key."""
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return s.lower().strip()
 
 _geocoder = Nominatim(user_agent="astro-mcp/1.0")
 _tf = TimezoneFinder()
@@ -59,9 +68,19 @@ def geocode_city(city: str, country_code: str = "") -> tuple[float, float, str]:
     Tries Nominatim first, falls back to KNOWN_CITIES table.
     Raises ValueError if city cannot be resolved.
     """
-    query = f"{city}, {country_code}" if country_code else city
+    # Prefer the hardcoded table: faster, deterministic, and needs no network
+    # (Cloud Run has no guaranteed outbound access to Nominatim).
+    key = _normalize(city)
+    if key in KNOWN_CITIES:
+        return KNOWN_CITIES[key]
 
-    # Try Nominatim (live geocoding)
+    # Try partial match against the table before reaching for the network
+    for known_key, coords in KNOWN_CITIES.items():
+        if key in known_key or known_key in key:
+            return coords
+
+    # Fall back to live geocoding for cities not in the table
+    query = f"{city}, {country_code}" if country_code else city
     try:
         location = _geocoder.geocode(query, timeout=5)
         if location:
@@ -71,16 +90,6 @@ def geocode_city(city: str, country_code: str = "") -> tuple[float, float, str]:
                 return lat, lng, tz_str
     except (GeocoderTimedOut, GeocoderUnavailable):
         pass
-
-    # Fall back to known cities table
-    key = city.lower().strip()
-    if key in KNOWN_CITIES:
-        return KNOWN_CITIES[key]
-
-    # Try partial match
-    for known_key, coords in KNOWN_CITIES.items():
-        if key in known_key or known_key in key:
-            return coords
 
     raise ValueError(
         f"Could not resolve location for '{city}'. "
