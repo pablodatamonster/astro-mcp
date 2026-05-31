@@ -3,12 +3,7 @@ Astrology MCP Server
 ====================
 Exposes two tools to Claude:
   - get_natal_chart   : Natal chart for any person
-  - get_solar_return  : Solar Return (Revolución Solar) for any year/location
-
-Run with:
-    python -m astro_mcp.server
-or via the installed script:
-    astro-mcp
+  - get_solar_return  : Solar Return (Revolucion Solar) for any year/location
 """
 
 import os
@@ -58,16 +53,12 @@ def get_natal_chart(
     name         : Person's name
     birth_date   : Date of birth in YYYY-MM-DD format (e.g. 1973-07-25)
     birth_time   : Time of birth in HH:MM format, 24h (e.g. 17:25)
-    city         : City of birth (e.g. 'Buenos Aires', 'London', 'Cordoba')
-    country_code : ISO 2-letter country code to help geocoding (e.g. 'AR', 'ES', 'MX')
-    lat          : Latitude override (decimal degrees). Provide if city geocoding fails.
-    lng          : Longitude override (decimal degrees).
-    tz_str       : Timezone override (e.g. 'America/Argentina/Buenos_Aires').
-    language     : Output language - 'en' for English, 'es' for Spanish (default: 'en')
-
-    Returns
-    -------
-    Formatted natal chart as text.
+    city         : City of birth (e.g. Buenos Aires, London, Cordoba)
+    country_code : ISO 2-letter country code (e.g. AR, ES, MX)
+    lat          : Latitude override (decimal degrees)
+    lng          : Longitude override (decimal degrees)
+    tz_str       : Timezone override (e.g. America/Argentina/Buenos_Aires)
+    language     : en for English, es for Spanish (default: en)
     """
     try:
         year, month, day = (int(p) for p in birth_date.split("-"))
@@ -80,16 +71,10 @@ def get_natal_chart(
             tz_str = tz_str or resolved_tz
 
         subject = AstrologicalSubject(
-            name,
-            year, month, day,
-            hour, minute,
-            city,
-            country_code or "XX",
-            lat=lat,
-            lng=lng,
-            tz_str=tz_str,
-            zodiac_type="Tropic",
-            online=False,
+            name, year, month, day, hour, minute,
+            city, country_code or "XX",
+            lat=lat, lng=lng, tz_str=tz_str,
+            zodiac_type="Tropic", online=False,
         )
 
         return render_natal_chart(
@@ -132,24 +117,16 @@ def get_solar_return(
     Parameters
     ----------
     name               : Person's name
-    birth_date         : Date of birth in YYYY-MM-DD format (e.g. 1973-07-25)
-    birth_time         : Time of birth in HH:MM format, 24h (e.g. 17:25)
+    birth_date         : Date of birth YYYY-MM-DD (e.g. 1973-07-25)
+    birth_time         : Time of birth HH:MM 24h (e.g. 17:25)
     birth_city         : City of birth
-    return_year        : The year for which to calculate the Solar Return (e.g. 2025)
-    birth_country_code : ISO 2-letter country code for birth city
-    birth_lat          : Latitude of birth city (override)
-    birth_lng          : Longitude of birth city (override)
-    birth_tz_str       : Timezone of birth city (override)
-    return_city        : City where the SR is cast (defaults to birth city)
-    return_country_code: ISO country code for return city
-    return_lat         : Latitude of return city (override)
-    return_lng         : Longitude of return city (override)
-    return_tz_str      : Timezone of return city (override)
-    language           : Output language - 'en' for English, 'es' for Spanish
-
-    Returns
-    -------
-    Formatted Solar Return chart as text.
+    return_year        : Year for the Solar Return (e.g. 2025)
+    birth_country_code : ISO 2-letter code for birth city
+    birth_lat/lng/tz_str : Coordinate overrides for birth city
+    return_city        : City where SR is cast (defaults to birth city)
+    return_country_code: ISO 2-letter code for return city
+    return_lat/lng/tz_str : Coordinate overrides for return city
+    language           : en for English, es for Spanish
     """
     try:
         b_year, b_month, b_day = (int(p) for p in birth_date.split("-"))
@@ -163,8 +140,8 @@ def get_solar_return(
 
         if return_city is None:
             return_city   = birth_city
-            return_lat    = return_lat  or birth_lat
-            return_lng    = return_lng  or birth_lng
+            return_lat    = return_lat    or birth_lat
+            return_lng    = return_lng    or birth_lng
             return_tz_str = return_tz_str or birth_tz_str
         else:
             if return_lat is None or return_lng is None or return_tz_str is None:
@@ -174,16 +151,10 @@ def get_solar_return(
                 return_tz_str = return_tz_str or rr_tz
 
         natal_subject = AstrologicalSubject(
-            name,
-            b_year, b_month, b_day,
-            b_hour, b_minute,
-            birth_city,
-            birth_country_code or "XX",
-            lat=birth_lat,
-            lng=birth_lng,
-            tz_str=birth_tz_str,
-            zodiac_type="Tropic",
-            online=False,
+            name, b_year, b_month, b_day, b_hour, b_minute,
+            birth_city, birth_country_code or "XX",
+            lat=birth_lat, lng=birth_lng, tz_str=birth_tz_str,
+            zodiac_type="Tropic", online=False,
         )
 
         sr_subject, sr_utc = compute_solar_return(
@@ -215,42 +186,38 @@ def get_solar_return(
 # Entry point
 # ---------------------------------------------------------------------------
 
-async def oauth_metadata(request: Request):
-    """
-    Return empty OAuth metadata so Claude.ai knows no auth is required.
-    Per the MCP spec, returning an empty object signals unauthenticated access.
-    """
-    base_url = str(request.base_url).rstrip("/")
-    return JSONResponse({
-        "issuer": base_url,
-        "token_endpoint": f"{base_url}/token",
-        "response_types_supported": ["token"],
-        "grant_types_supported": ["client_credentials"],
-    })
-
-
-async def token_endpoint(request: Request):
-    """Issue a dummy token so clients that require one can proceed."""
-    return JSONResponse({
-        "access_token": "no-auth-required",
-        "token_type": "bearer",
-        "expires_in": 86400,
-    })
-
-
 def main():
     port = int(os.environ.get("PORT", 8080))
 
     mcp_app = mcp.streamable_http_app()
 
+    # RFC 9728: Protected Resource Metadata with empty authorization_servers
+    # tells Claude.ai that this server requires NO authentication.
+    async def protected_resource_meta(request: Request) -> JSONResponse:
+        base = str(request.base_url).rstrip("/")
+        return JSONResponse({
+            "resource": f"{base}/mcp",
+            "authorization_servers": [],
+            "bearer_methods_supported": [],
+            "scopes_supported": [],
+        })
+
+    # Fallback OAuth discovery endpoint - returns empty to signal no auth
+    async def oauth_server_meta(request: Request) -> JSONResponse:
+        return JSONResponse({})
+
     app = Starlette(
         routes=[
             Route(
-                "/.well-known/oauth-authorization-server",
-                oauth_metadata,
+                "/.well-known/oauth-protected-resource/mcp",
+                protected_resource_meta,
                 methods=["GET"],
             ),
-            Route("/token", token_endpoint, methods=["POST"]),
+            Route(
+                "/.well-known/oauth-authorization-server",
+                oauth_server_meta,
+                methods=["GET"],
+            ),
             Mount("/", app=mcp_app),
         ]
     )
