@@ -9,12 +9,11 @@ description = "Astrology MCP Server - Natal Charts and Solar Returns (EN/ES)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp[cli]>=1.0.0",
+    "fastmcp[auth]>=2.0.0",
     "kerykeion>=4.0.0",
     "geopy>=2.4.0",
     "timezonefinder>=6.0.0",
     "pyswisseph>=2.10.0",
-    "uvicorn>=0.30.0",
 ]
 
 [project.scripts]

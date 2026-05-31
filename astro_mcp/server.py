@@ -2,22 +2,14 @@
 Astrology MCP Server
 ====================
 Tools: get_natal_chart, get_solar_return
-OAuth: custom minimal implementation, accepts all clients
+OAuth: fastmcp InMemoryOAuthProvider (permissive, accepts all clients)
 """
 
 import os
-import secrets
-import time
-import uvicorn
 
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse
-from starlette.routing import Mount, Route
-from starlette.middleware.cors import CORSMiddleware
-from urllib.parse import urlencode
-
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
+from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
+from mcp.server.auth.settings import ClientRegistrationOptions
 from kerykeion import AstrologicalSubject
 
 from .geocode import geocode_city
@@ -25,12 +17,19 @@ from .chart import render_natal_chart, render_solar_return
 from .solar_return import compute_solar_return
 
 
-# ---------------------------------------------------------------------------
-# MCP server (no auth - our custom OAuth layer handles that separately)
-# ---------------------------------------------------------------------------
+BASE_URL = os.environ.get(
+    "BASE_URL",
+    "https://astro-mcp-187388165727.europe-west1.run.app",
+)
+
+auth = InMemoryOAuthProvider(
+    base_url=BASE_URL,
+    client_registration_options=ClientRegistrationOptions(enabled=True),
+)
 
 mcp = FastMCP(
     "astro-mcp",
+    auth=auth,
     instructions=(
         "Astrology server providing natal charts and solar returns. "
         "Supports English and Spanish output. "
@@ -188,108 +187,12 @@ def get_solar_return(
 
 
 # ---------------------------------------------------------------------------
-# Custom minimal OAuth 2.0 layer
-# Accepts all clients, issues tokens freely. No real authentication needed.
-# ---------------------------------------------------------------------------
-
-_clients: dict = {}
-_codes:   dict = {}
-_tokens:  dict = {}
-
-
-async def oauth_discovery(request: Request) -> JSONResponse:
-    base = str(request.base_url).rstrip("/")
-    return JSONResponse({
-        "issuer":                                base,
-        "authorization_endpoint":                f"{base}/authorize",
-        "token_endpoint":                        f"{base}/token",
-        "registration_endpoint":                 f"{base}/register",
-        "response_types_supported":              ["code"],
-        "grant_types_supported":                 ["authorization_code", "refresh_token"],
-        "token_endpoint_auth_methods_supported": ["none", "client_secret_post", "client_secret_basic"],
-        "code_challenge_methods_supported":      ["S256"],
-    })
-
-
-async def register(request: Request) -> JSONResponse:
-    """Accept any client registration without validation."""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    client_id     = secrets.token_urlsafe(16)
-    client_secret = secrets.token_urlsafe(32)
-    _clients[client_id] = {**body, "client_id": client_id}
-    return JSONResponse({
-        "client_id":                  client_id,
-        "client_secret":              client_secret,
-        "client_id_issued_at":        int(time.time()),
-        "grant_types":                body.get("grant_types", ["authorization_code"]),
-        "response_types":             body.get("response_types", ["code"]),
-        "redirect_uris":              body.get("redirect_uris", []),
-        "token_endpoint_auth_method": body.get("token_endpoint_auth_method", "none"),
-    }, status_code=201)
-
-
-async def authorize(request: Request) -> RedirectResponse:
-    """Immediately issue an auth code and redirect back. No login page needed."""
-    params      = dict(request.query_params)
-    code        = secrets.token_urlsafe(32)
-    redirect_uri = params.get("redirect_uri", "/")
-    _codes[code] = {
-        "client_id":    params.get("client_id"),
-        "redirect_uri": redirect_uri,
-        "expires_at":   time.time() + 300,
-    }
-    sep = "&" if "?" in redirect_uri else "?"
-    qp  = {"code": code}
-    if "state" in params:
-        qp["state"] = params["state"]
-    return RedirectResponse(redirect_uri + sep + urlencode(qp), status_code=302)
-
-
-async def token_endpoint(request: Request) -> JSONResponse:
-    """Issue an access token for any valid-looking request."""
-    try:
-        form = dict(await request.form())
-    except Exception:
-        form = {}
-    access_token  = secrets.token_urlsafe(32)
-    refresh_token = secrets.token_urlsafe(32)
-    _tokens[access_token] = {"expires_at": time.time() + 3600}
-    return JSONResponse({
-        "access_token":  access_token,
-        "token_type":    "bearer",
-        "expires_in":    3600,
-        "refresh_token": refresh_token,
-    })
-
-
-# ---------------------------------------------------------------------------
-# Entry point: assemble the full app
+# Entry point
 # ---------------------------------------------------------------------------
 
 def main():
-    port    = int(os.environ.get("PORT", 8080))
-    mcp_app = mcp.streamable_http_app()
-
-    app = Starlette(routes=[
-        Route("/.well-known/oauth-authorization-server", oauth_discovery, methods=["GET", "OPTIONS"]),
-        Route("/register",  register,        methods=["POST", "OPTIONS"]),
-        Route("/authorize", authorize,        methods=["GET",  "OPTIONS"]),
-        Route("/token",     token_endpoint,   methods=["POST", "OPTIONS"]),
-        Mount("/", app=mcp_app),
-    ])
-
-    # Wide-open CORS so Claude.ai (browser-based) can reach all endpoints
-    app = CORSMiddleware(
-        app,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 8080))
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
